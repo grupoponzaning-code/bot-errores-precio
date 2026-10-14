@@ -1,30 +1,27 @@
 #!/usr/bin/env python3
 """
-Bot gratuito de errores de precio (Amazon, El Corte Inglés y otras tiendas)
+Bot gratuito de grandes bajadas de precio (todas las tiendas)
 
-Vigila el feed RSS de ofertas nuevas de Chollometro y avisa por Telegram
-cuando una oferta de las tiendas elegidas:
-  - menciona "error de precio" o similar, o
-  - indica un precio anterior con una bajada >= DESCUENTO_MIN % (50 por defecto).
+Lee el listado de ofertas nuevas de Chollometro (varias páginas) y avisa por
+Telegram de cada oferta cuyo precio esté al menos DESCUENTO_MIN % por debajo
+del precio de referencia que muestra Chollometro (el precio tachado).
 
 Nivel del aviso según la bajada:
   🟢 verde    del 50 al 65 %
   🟠 naranja  más del 65 % hasta el 80 %
-  🔴 rojo     más del 80 %, o si se menciona "error de precio" sin porcentaje conocido
-
-No necesita ninguna cuenta de pago. Solo un bot de Telegram.
+  🔴 rojo     más del 80 %, o si el título menciona "error de precio"
 
 Variables de entorno:
   TELEGRAM_TOKEN, TELEGRAM_CHAT_ID   (obligatorias)
-  TIENDAS        tiendas separadas por comas (por defecto "amazon,corte ingles")
   DESCUENTO_MIN  porcentaje mínimo de bajada (por defecto 50)
+  TIENDAS        opcional: limitar a estas tiendas, separadas por comas.
+                 Vacío (por defecto) = todas las tiendas.
+  VENTANA_MIN    minutos hacia atrás que se revisan en cada pasada (por defecto 180)
   INTERVALO_MIN  minutos entre consultas en modo continuo (por defecto 3)
-  AVISAR_TODO    "1" para recibir todas las ofertas de esas tiendas
 
 Uso:
   python3 bot_errores_gratis.py            modo continuo (ordenador o servidor)
   python3 bot_errores_gratis.py --una-vez  una sola pasada (para GitHub Actions)
-  python3 bot_errores_gratis.py --chat-id  muestra tu TELEGRAM_CHAT_ID
 """
 
 import html
@@ -34,19 +31,17 @@ import re
 import sys
 import time
 import unicodedata
-import xml.etree.ElementTree as ET
-from datetime import datetime, timezone
-from email.utils import parsedate_to_datetime
+from datetime import datetime
 from pathlib import Path
 
 import requests
 
 TG_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
 TG_CHAT = os.getenv("TELEGRAM_CHAT_ID", "")
-DESCUENTO_MIN = int(os.getenv("DESCUENTO_MIN", "50"))
-INTERVALO_MIN = int(os.getenv("INTERVALO_MIN", "3"))
-AVISAR_TODO = os.getenv("AVISAR_TODO", "0") == "1"
-VENTANA_UNA_VEZ_MIN = int(os.getenv("VENTANA_MIN", "120"))
+DESCUENTO_MIN = int(os.getenv("DESCUENTO_MIN") or "50")
+VENTANA_MIN = int(os.getenv("VENTANA_MIN") or "180")
+INTERVALO_MIN = int(os.getenv("INTERVALO_MIN") or "3")
+MAX_PAGINAS = 10
 
 
 def normalizar(texto):
@@ -54,141 +49,109 @@ def normalizar(texto):
     return re.sub(r"\s+", " ", texto.lower()).strip()
 
 
-TIENDAS = [normalizar(t) for t in os.getenv("TIENDAS", "amazon,corte ingles").split(",") if t.strip()]
+TIENDAS = [normalizar(t) for t in (os.getenv("TIENDAS") or "").split(",") if t.strip()]
 
-FEED = "https://www.chollometro.com/rss/nuevos"
-CABECERAS = {"User-Agent": "Mozilla/5.0 (bot personal de alertas RSS)"}
+LISTADO = "https://www.chollometro.com/nuevos?page={}"
+CABECERAS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/126.0 Safari/537.36",
+    "Accept-Language": "es-ES,es;q=0.9",
+}
 ESTADO = Path(__file__).with_name("vistos_gratis.json")
-
+BLOQUE = re.compile(r"data-vue3='([^']*ThreadMainListItemNormalizer[^']*)'")
 PALABRAS_ERROR = re.compile(
     r"error\s+de\s+precio|precio\s+(err[oó]neo|de\s+error)|posible\s+error|"
-    r"\bbug\b|\bglitch\b|error\s+en\s+el\s+precio", re.I)
-PRECIO = r"(\d{1,3}(?:\.\d{3})*(?:,\d{1,2})?|\d+(?:,\d{1,2})?)\s?€"
-PRECIO_ANTES = re.compile(
-    r"(?:antes|pvp|precio\s+(?:original|habitual|anterior|normal|recomendado)|era[n]?)\s*:?\s*"
-    + PRECIO, re.I)
+    r"error\s+en\s+el\s+precio|\bglitch\b", re.I)
 
 
 def log(msg):
     print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] {msg}", flush=True)
 
 
-def a_float(texto):
-    try:
-        return float(texto.replace("€", "").strip().replace(".", "").replace(",", "."))
-    except (ValueError, AttributeError):
-        return None
-
-
-def limpiar(texto_html):
-    return html.unescape(re.sub(r"<[^>]+>", " ", texto_html or ""))
-
-
-def leer_feed(xml_bytes):
+def leer_listado(html_texto):
+    """Extrae las ofertas de una página del listado de Chollometro."""
     ofertas = []
-    for item in ET.fromstring(xml_bytes).iter("item"):
-        o = {"titulo": "", "link": "", "texto": "", "tienda": "", "precio": None, "fecha": None}
-        for hijo in item:
-            tag = hijo.tag.split("}")[-1]
-            if tag == "title":
-                o["titulo"] = (hijo.text or "").strip()
-            elif tag in ("link", "guid") and not o["link"]:
-                o["link"] = (hijo.text or "").strip()
-            elif tag == "description":
-                o["texto"] = limpiar(hijo.text)
-            elif tag == "merchant":
-                o["tienda"] = hijo.get("name", "")
-                o["precio"] = a_float(hijo.get("price") or "")
-            elif tag == "pubDate":
-                try:
-                    o["fecha"] = parsedate_to_datetime(hijo.text)
-                except (TypeError, ValueError):
-                    pass
-        ofertas.append(o)
+    for bloque in BLOQUE.findall(html_texto):
+        try:
+            hilo = json.loads(html.unescape(bloque))["props"]["thread"]
+        except (ValueError, KeyError, TypeError):
+            continue
+        ofertas.append({
+            "id": str(hilo.get("threadId")),
+            "titulo": hilo.get("title") or "",
+            "tienda": (hilo.get("merchant") or {}).get("merchantName") or hilo.get("linkHost") or "",
+            "precio": hilo.get("price"),
+            "referencia": hilo.get("nextBestPrice"),
+            "envio": (hilo.get("shipping") or {}).get("price"),
+            "publicada": hilo.get("publishedAt") or 0,
+            "caducada": bool(hilo.get("isExpired")),
+            "link": f"https://www.chollometro.com/ofertas/{hilo.get('titleSlug')}-{hilo.get('threadId')}",
+        })
     return ofertas
 
 
+def descargar(ventana_min):
+    """Descarga páginas del listado hasta cubrir la ventana de tiempo."""
+    limite = time.time() - ventana_min * 60
+    todas = {}
+    for pagina in range(1, MAX_PAGINAS + 1):
+        r = requests.get(LISTADO.format(pagina), headers=CABECERAS, timeout=30)
+        r.raise_for_status()
+        ofertas = leer_listado(r.text)
+        if not ofertas:
+            log(f"Página {pagina} sin ofertas legibles (¿cambió la web?)")
+            break
+        for o in ofertas:
+            todas[o["id"]] = o
+        if min(o["publicada"] for o in ofertas) < limite:
+            break
+        time.sleep(1)
+    return [o for o in todas.values() if o["publicada"] >= limite]
+
+
 def tienda_vigilada(o):
+    if not TIENDAS:
+        return True
     tienda = normalizar(o["tienda"])
-    return next((t for t in TIENDAS if t in tienda), None)
+    return any(t in tienda for t in TIENDAS)
 
 
 def nivel(caida):
-    if caida is None or caida > 80:
+    if caida > 80:
         return "🔴"
     if caida > 65:
         return "🟠"
     return "🟢"
 
 
-def precio_referencia(o):
-    """Lee de la página de la oferta el precio de referencia que muestra Chollometro
-    (campo nextBestPrice). Devuelve (precio_actual, precio_referencia) o (None, None)."""
-    m = re.search(r"(\d+)/?$", o["link"])
-    if not m:
-        return None, None
-    hilo = m.group(1)
-    try:
-        r = requests.get(o["link"], headers=CABECERAS, timeout=20)
-        r.raise_for_status()
-        h = r.text
-    except Exception as e:
-        log(f"No se pudo abrir la oferta {hilo}: {e}")
-        return None, None
-    i = h.find(f"share-deal\\/{hilo}")
-    if i < 0:
-        i = h.find(f"share-deal/{hilo}")
-    if i < 0:
-        return None, None
-    trozo = h[max(0, i - 1500): i + 1500]
-    ref = re.search(r'"nextBestPrice":([\d.]+)', trozo)
-    act = re.search(r'"price":([\d.]+)', trozo)
-    referencia = float(ref.group(1)) if ref else None
-    actual = float(act.group(1)) if act else None
-    return actual, referencia
-
-
-def calcular_caida(o):
-    actual = o["precio"]
-    texto = o["titulo"] + " " + o["texto"]
-    candidatos = [p for p in (a_float(m) for m in PRECIO_ANTES.findall(texto)) if p]
-    # Precio de referencia de Chollometro (página de la oferta)
-    act_web, ref_web = precio_referencia(o)
-    if not actual and act_web:
-        actual = act_web
-        o["precio"] = act_web
-    if ref_web:
-        candidatos.append(ref_web)
-    if not actual:
-        return None, None
-    antes = [p for p in candidatos if p > actual]
-    if not antes:
-        return None, None
-    return round((1 - actual / max(antes)) * 100), max(antes)
-
-
 def evaluar(o):
-    """Devuelve (color, motivo) o None si no hay que avisar."""
-    if not tienda_vigilada(o):
+    """Devuelve (color, caida) o None si no hay que avisar."""
+    if o["caducada"] or not tienda_vigilada(o):
         return None
-    caida, antes = calcular_caida(o)
-    mencion = bool(PALABRAS_ERROR.search(o["titulo"] + " " + o["texto"]))
+    precio, ref = o["precio"], o["referencia"]
+    caida = None
+    if precio and ref and ref > precio > 0:
+        caida = round((1 - precio / ref) * 100)
     if caida is not None and caida >= DESCUENTO_MIN:
-        motivo = f"-{caida}% (antes {antes:.2f} €)"
-        if mencion:
-            motivo += " · mencionado como error de precio"
-        return nivel(caida), motivo
-    if mencion:
-        return "🔴", "mencionado como error de precio"
-    return ("⚪", "oferta nueva") if AVISAR_TODO else None
+        return nivel(caida), caida
+    if PALABRAS_ERROR.search(o["titulo"]):
+        return "🔴", caida
+    return None
 
 
 def formatear(o, aviso):
-    color, motivo = aviso
-    precio = f"{o['precio']:.2f} €" if o["precio"] else "ver oferta"
-    return (f"{color} <b>{html.escape(o['tienda'] or 'Tienda')}</b>: {html.escape(motivo)}\n"
-            f"{html.escape(o['titulo'][:150])}\n\n"
-            f"Precio: <b>{precio}</b>\n{o['link']}")
+    color, caida = aviso
+    cabecera = f"-{caida}%" if caida is not None else "Posible error de precio"
+    lineas = [f"{color} <b>{cabecera}</b> · {html.escape(o['tienda'] or 'Tienda')}",
+              html.escape(o["titulo"][:150]), ""]
+    precio = f"<b>{o['precio']:.2f} €</b>" if o["precio"] else "ver oferta"
+    if o["referencia"]:
+        precio += f"  (antes {o['referencia']:.2f} €)"
+    lineas.append(f"Precio: {precio}")
+    if o["envio"]:
+        lineas.append(f"Envío: {o['envio']:.2f} €")
+    lineas.append(o["link"])
+    return "\n".join(lineas)
 
 
 def enviar_telegram(texto):
@@ -198,33 +161,6 @@ def enviar_telegram(texto):
     r.raise_for_status()
 
 
-def descargar():
-    r = requests.get(FEED, headers=CABECERAS, timeout=30)
-    r.raise_for_status()
-    return leer_feed(r.content)
-
-
-def avisar(ofertas, ya_vistos):
-    """Envía los avisos de las ofertas no vistas. Devuelve los enlaces procesados."""
-    procesados = []
-    for o in ofertas:
-        if not o["link"] or o["link"] in ya_vistos:
-            continue
-        procesados.append(o["link"])
-        aviso = evaluar(o)
-        if tienda_vigilada(o):
-            log(f"Revisada: {o['tienda']} | {o['precio']} € | {o['titulo'][:50]} -> {aviso[1] if aviso else 'sin aviso'}")
-        if aviso:
-            try:
-                enviar_telegram(formatear(o, aviso))
-                log(f"Aviso: {o['tienda']} | {o['titulo'][:60]}")
-            except Exception as e:
-                log(f"Error enviando a Telegram: {e}")
-    return procesados
-
-
-# ---------- modo continuo ----------
-
 def cargar_vistos():
     try:
         return json.loads(ESTADO.read_text())
@@ -233,72 +169,50 @@ def cargar_vistos():
 
 
 def guardar_vistos(vistos):
-    limite = time.time() - 14 * 86400
+    limite = time.time() - 7 * 86400
     vistos = {k: v for k, v in vistos.items() if v > limite}
     ESTADO.write_text(json.dumps(vistos))
     return vistos
 
 
-def modo_continuo():
-    vistos = cargar_vistos()
-    if not vistos:  # primera vez: no avisar de lo que ya estaba publicado
-        try:
-            vistos = {o["link"]: time.time() for o in descargar() if o["link"]}
-            vistos = guardar_vistos(vistos)
-        except Exception as e:
-            log(f"Error inicial leyendo el feed: {e}")
-    enviar_telegram(f"✅ Bot activo. Tiendas: {', '.join(TIENDAS)}. "
-                    f"Reviso cada {INTERVALO_MIN} min.")
-    while True:
-        time.sleep(INTERVALO_MIN * 60)
-        try:
-            ofertas = descargar()
-        except Exception as e:
-            log(f"Error leyendo el feed: {e}")
+def pasada(vistos):
+    ofertas = descargar(VENTANA_MIN)
+    avisos = 0
+    for o in sorted(ofertas, key=lambda x: x["publicada"]):
+        if o["id"] in vistos:
             continue
-        for link in avisar(ofertas, vistos):
-            vistos[link] = time.time()
-        vistos = guardar_vistos(vistos)
-
-
-# ---------- modo una vez (GitHub Actions) ----------
-
-def modo_una_vez():
-    """Sin estado: solo procesa ofertas publicadas en los últimos VENTANA_MIN minutos.
-    Los enlaces ya avisados se guardan en el fichero de estado si existe (caché)."""
-    vistos = cargar_vistos()
-    ahora = datetime.now(timezone.utc)
-    recientes = [o for o in descargar()
-                 if o["fecha"] and (ahora - o["fecha"]).total_seconds() < VENTANA_UNA_VEZ_MIN * 60]
-    for link in avisar(recientes, vistos):
-        vistos[link] = time.time()
-    guardar_vistos(vistos)
-    log(f"Pasada completada: {len(recientes)} ofertas recientes, "
-        f"{sum(1 for o in recientes if tienda_vigilada(o))} de las tiendas vigiladas")
-
-
-def mostrar_chat_id():
-    r = requests.get(f"https://api.telegram.org/bot{TG_TOKEN}/getUpdates", timeout=20)
-    for u in r.json().get("result", []):
-        chat = (u.get("message") or {}).get("chat")
-        if chat:
-            print(f"Tu TELEGRAM_CHAT_ID es: {chat['id']}")
-            return
-    print("No hay mensajes. Escribe cualquier cosa a tu bot en Telegram y vuelve a ejecutar.")
+        aviso = evaluar(o)
+        if not aviso:
+            continue
+        try:
+            enviar_telegram(formatear(o, aviso))
+            vistos[o["id"]] = time.time()
+            avisos += 1
+            log(f"Aviso {aviso[0]} {aviso[1]}% | {o['tienda']} | {o['precio']} / {o['referencia']} | {o['titulo'][:50]}")
+        except Exception as e:
+            log(f"Error enviando a Telegram: {e}")
+    con_ref = sum(1 for o in ofertas if o["referencia"])
+    log(f"Pasada completada: {len(ofertas)} ofertas de los últimos {VENTANA_MIN} min "
+        f"({con_ref} con precio de referencia), {avisos} avisos enviados")
+    return guardar_vistos(vistos)
 
 
 def main():
-    if not TG_TOKEN:
-        sys.exit("Falta la variable TELEGRAM_TOKEN")
-    if "--chat-id" in sys.argv:
-        mostrar_chat_id()
-        return
-    if not TG_CHAT:
-        sys.exit("Falta la variable TELEGRAM_CHAT_ID (ejecuta con --chat-id para obtenerla)")
+    falta = [n for n, v in [("TELEGRAM_TOKEN", TG_TOKEN), ("TELEGRAM_CHAT_ID", TG_CHAT)] if not v]
+    if falta:
+        sys.exit("Faltan variables: " + ", ".join(falta))
+    vistos = cargar_vistos()
     if "--una-vez" in sys.argv:
-        modo_una_vez()
-    else:
-        modo_continuo()
+        pasada(vistos)
+        return
+    enviar_telegram(f"✅ Bot activo. Aviso de bajadas desde el {DESCUENTO_MIN}% en "
+                    f"{', '.join(TIENDAS) if TIENDAS else 'todas las tiendas'}.")
+    while True:
+        try:
+            vistos = pasada(vistos)
+        except Exception as e:
+            log(f"Error en la pasada: {e}")
+        time.sleep(INTERVALO_MIN * 60)
 
 
 if __name__ == "__main__":
