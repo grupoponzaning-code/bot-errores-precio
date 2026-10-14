@@ -46,7 +46,7 @@ TG_CHAT = os.getenv("TELEGRAM_CHAT_ID", "")
 DESCUENTO_MIN = int(os.getenv("DESCUENTO_MIN", "50"))
 INTERVALO_MIN = int(os.getenv("INTERVALO_MIN", "3"))
 AVISAR_TODO = os.getenv("AVISAR_TODO", "0") == "1"
-VENTANA_UNA_VEZ_MIN = int(os.getenv("VENTANA_MIN", "20"))
+VENTANA_UNA_VEZ_MIN = int(os.getenv("VENTANA_MIN", "120"))
 
 
 def normalizar(texto):
@@ -121,12 +121,47 @@ def nivel(caida):
     return "🟢"
 
 
+def precio_referencia(o):
+    """Lee de la página de la oferta el precio de referencia que muestra Chollometro
+    (campo nextBestPrice). Devuelve (precio_actual, precio_referencia) o (None, None)."""
+    m = re.search(r"(\d+)/?$", o["link"])
+    if not m:
+        return None, None
+    hilo = m.group(1)
+    try:
+        r = requests.get(o["link"], headers=CABECERAS, timeout=20)
+        r.raise_for_status()
+        h = r.text
+    except Exception as e:
+        log(f"No se pudo abrir la oferta {hilo}: {e}")
+        return None, None
+    i = h.find(f"share-deal\\/{hilo}")
+    if i < 0:
+        i = h.find(f"share-deal/{hilo}")
+    if i < 0:
+        return None, None
+    trozo = h[max(0, i - 1500): i + 1500]
+    ref = re.search(r'"nextBestPrice":([\d.]+)', trozo)
+    act = re.search(r'"price":([\d.]+)', trozo)
+    referencia = float(ref.group(1)) if ref else None
+    actual = float(act.group(1)) if act else None
+    return actual, referencia
+
+
 def calcular_caida(o):
     actual = o["precio"]
+    texto = o["titulo"] + " " + o["texto"]
+    candidatos = [p for p in (a_float(m) for m in PRECIO_ANTES.findall(texto)) if p]
+    # Precio de referencia de Chollometro (página de la oferta)
+    act_web, ref_web = precio_referencia(o)
+    if not actual and act_web:
+        actual = act_web
+        o["precio"] = act_web
+    if ref_web:
+        candidatos.append(ref_web)
     if not actual:
         return None, None
-    texto = o["titulo"] + " " + o["texto"]
-    antes = [p for p in (a_float(m) for m in PRECIO_ANTES.findall(texto)) if p and p > actual]
+    antes = [p for p in candidatos if p > actual]
     if not antes:
         return None, None
     return round((1 - actual / max(antes)) * 100), max(antes)
@@ -177,6 +212,8 @@ def avisar(ofertas, ya_vistos):
             continue
         procesados.append(o["link"])
         aviso = evaluar(o)
+        if tienda_vigilada(o):
+            log(f"Revisada: {o['tienda']} | {o['precio']} € | {o['titulo'][:50]} -> {aviso[1] if aviso else 'sin aviso'}")
         if aviso:
             try:
                 enviar_telegram(formatear(o, aviso))
@@ -236,7 +273,8 @@ def modo_una_vez():
     for link in avisar(recientes, vistos):
         vistos[link] = time.time()
     guardar_vistos(vistos)
-    log(f"Pasada completada: {len(recientes)} ofertas recientes revisadas")
+    log(f"Pasada completada: {len(recientes)} ofertas recientes, "
+        f"{sum(1 for o in recientes if tienda_vigilada(o))} de las tiendas vigiladas")
 
 
 def mostrar_chat_id():
