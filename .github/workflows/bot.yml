@@ -34,7 +34,7 @@ jobs:
         run: |
           curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage" \
             -d chat_id="${TELEGRAM_CHAT_ID}" \
-            --data-urlencode text="✅ Bot conectado. Aviso de bajadas desde el 50% en todas las tiendas de Chollometro." \
+            --data-urlencode text="✅ Bot conectado. Aviso de bajadas de más del 65% (naranjas y rojas) en todas las tiendas de Chollometro." \
             | tee respuesta.json
           grep -q '"ok":true' respuesta.json
         env:
@@ -44,4 +44,4 @@ jobs:
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          DESCUENTO_MIN: "50"
+          DESCUENTO_MIN: "66"   # solo naranjas (más del 65%) y rojos
