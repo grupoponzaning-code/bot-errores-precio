@@ -15,6 +15,9 @@ No avisa de videojuegos: descarta la categoría de videojuegos/gaming de
 Chollometro y los títulos de juegos (PS5, Xbox, Switch, Steam...). Las consolas,
 mandos, auriculares y demás hardware sí avisan. Los juegos de mesa también.
 
+Tampoco avisa de figuras Funko ni de ropa de clubes de fútbol (camisetas,
+equipaciones, chándales, bufandas... del Real Madrid, Barça, selecciones, etc.).
+
 Variables de entorno:
   TELEGRAM_TOKEN, TELEGRAM_CHAT_ID   (obligatorias)
   DESCUENTO_MIN  porcentaje mínimo de bajada (por defecto 50)
@@ -54,10 +57,24 @@ PLATAFORMAS = re.compile(
     r"definitiva|completa|coleccionista)|dlc|season pass|game pass|pc digital|"
     r"c[oó]digo digital|key)\b", re.I)
 HARDWARE = re.compile(
-    r"\b(consolas?|mandos?|controllers?|gamepads?|joysticks?|visor(es)? vr|gafas vr|auriculares|cascos|headset|rat[oó]n|teclados?|"
+    r"\b(consolas?|mandos?|controllers?|gamepads?|joysticks?|fightsticks?|arcade stick|visor(es)? vr|gafas vr|auriculares|cascos|headset|rat[oó]n|teclados?|"
     r"monitor(es)?|pantallas?|sillas?|tarjetas? gr[aá]ficas?|gr[aá]ficas?|ssd|disco|"
     r"memoria|port[aá]til(es)?|televisor|tv|volantes?|cargador(es)?|base de carga|"
     r"funda|estuche|joy-?cons?|webcam|micr[oó]fonos?|router|tablet)\b", re.I)
+
+FUNKO = re.compile(r"\bfunko\b", re.I)
+ROPA_CLUB = re.compile(
+    r"\b(camisetas?|equipaci[oó]n(es)?|kits?|jerseys?|sudaderas?|ch[aá]ndals?|chaquetas?|"
+    r"chaquet[oó]n|abrigos?|cortavientos|polos?|pantal[oó]n(es)?|shorts|calcetines|medias|"
+    r"bufandas?|gorras?|gorros?|training|entrenamiento|prepartido|pre-?match|anthem)\b", re.I)
+CLUBES = re.compile(
+    r"\b(f[uú]tbol|real madrid|bar[cç]a|fc barcelona|barcelona|atl[eé]tico|atleti|sevilla|"
+    r"betis|valencia cf|athletic|real sociedad|villarreal|celta|osasuna|espanyol|getafe|"
+    r"rayo vallecano|mallorca|girona|las palmas|alav[eé]s|legan[eé]s|valladolid|deportivo|"
+    r"real zaragoza|sporting|m[aá]laga cf|manchester|man (utd|united|city)|liverpool|chelsea|"
+    r"arsenal|tottenham|newcastle|psg|paris saint|juventus|ac milan|inter de mil[aá]n|"
+    r"inter milan|napoli|roma|bayern|dortmund|ajax|benfica|oporto|porto|boca juniors|"
+    r"river plate|selecci[oó]n|la roja|espa[nñ]a 20\d\d|mundial|eurocopa|fc|cf|ud)\b", re.I)
 
 
 def normalizar(texto):
@@ -151,11 +168,19 @@ def es_videojuego(o):
     return "gaming" in grupo or "videojuego" in grupo or bool(PLATAFORMAS.search(titulo))
 
 
+def es_excluido(o):
+    """Funko y ropa de clubes de fútbol."""
+    t = o["titulo"]
+    return bool(FUNKO.search(t)) or (bool(ROPA_CLUB.search(t)) and bool(CLUBES.search(t)))
+
+
 def evaluar(o):
     """Devuelve (color, caida) o None si no hay que avisar."""
     if o["caducada"] or not tienda_vigilada(o):
         return None
     if EXCLUIR_VIDEOJUEGOS and es_videojuego(o):
+        return None
+    if es_excluido(o):
         return None
     precio, ref = o["precio"], o["referencia"]
     caida = None
