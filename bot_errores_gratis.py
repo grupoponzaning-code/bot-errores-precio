@@ -7,15 +7,20 @@ Telegram de cada oferta cuyo precio esté al menos DESCUENTO_MIN % por debajo
 del precio de referencia que muestra Chollometro (el precio tachado).
 
 Nivel del aviso según la bajada:
-  🟢 verde    del 50 al 65 %
-  🟠 naranja  más del 65 % hasta el 80 %
+  🟢 verde    del 50 al 69 %   (desactivado con DESCUENTO_MIN=70)
+  🟠 naranja  del 70 al 80 %
   🔴 rojo     más del 80 %, o si el título menciona "error de precio"
+
+No avisa de videojuegos: descarta la categoría de videojuegos/gaming de
+Chollometro y los títulos de juegos (PS5, Xbox, Switch, Steam...). Las consolas,
+mandos, auriculares y demás hardware sí avisan. Los juegos de mesa también.
 
 Variables de entorno:
   TELEGRAM_TOKEN, TELEGRAM_CHAT_ID   (obligatorias)
   DESCUENTO_MIN  porcentaje mínimo de bajada (por defecto 50)
   TIENDAS        opcional: limitar a estas tiendas, separadas por comas.
                  Vacío (por defecto) = todas las tiendas.
+  EXCLUIR_VIDEOJUEGOS  "0" para volver a recibir videojuegos (por defecto "1")
   VENTANA_MIN    minutos hacia atrás que se revisan en cada pasada (por defecto 180)
   INTERVALO_MIN  minutos entre consultas en modo continuo (por defecto 3)
 
@@ -42,6 +47,17 @@ DESCUENTO_MIN = int(os.getenv("DESCUENTO_MIN") or "50")
 VENTANA_MIN = int(os.getenv("VENTANA_MIN") or "180")
 INTERVALO_MIN = int(os.getenv("INTERVALO_MIN") or "3")
 MAX_PAGINAS = 10
+EXCLUIR_VIDEOJUEGOS = (os.getenv("EXCLUIR_VIDEOJUEGOS") or "1") == "1"
+PLATAFORMAS = re.compile(
+    r"\b(ps[345]|playstation|xbox|nintendo|switch ?2?|steam|epic games|gog|"
+    r"videojuegos?|juego para|edici[oó]n (deluxe|est[aá]ndar|standard|gold|ultimate|"
+    r"definitiva|completa|coleccionista)|dlc|season pass|game pass|pc digital|"
+    r"c[oó]digo digital|key)\b", re.I)
+HARDWARE = re.compile(
+    r"\b(consolas?|mandos?|controllers?|gamepads?|joysticks?|visor(es)? vr|gafas vr|auriculares|cascos|headset|rat[oó]n|teclados?|"
+    r"monitor(es)?|pantallas?|sillas?|tarjetas? gr[aá]ficas?|gr[aá]ficas?|ssd|disco|"
+    r"memoria|port[aá]til(es)?|televisor|tv|volantes?|cargador(es)?|base de carga|"
+    r"funda|estuche|joy-?cons?|webcam|micr[oó]fonos?|router|tablet)\b", re.I)
 
 
 def normalizar(texto):
@@ -85,6 +101,8 @@ def leer_listado(html_texto):
             "envio": (hilo.get("shipping") or {}).get("price"),
             "publicada": hilo.get("publishedAt") or 0,
             "caducada": bool(hilo.get("isExpired")),
+            "grupo": " ".join(filter(None, [(hilo.get("mainGroup") or {}).get("threadGroupUrlName"),
+                                            (hilo.get("mainGroup") or {}).get("threadGroupName")])),
             "link": f"https://www.chollometro.com/ofertas/{hilo.get('titleSlug')}-{hilo.get('threadId')}",
         })
     return ofertas
@@ -119,14 +137,25 @@ def tienda_vigilada(o):
 def nivel(caida):
     if caida > 80:
         return "🔴"
-    if caida > 65:
+    if caida >= 70:
         return "🟠"
     return "🟢"
+
+
+def es_videojuego(o):
+    """Juegos (no hardware). Usa la categoría de Chollometro y el título."""
+    titulo = o["titulo"]
+    if HARDWARE.search(titulo):
+        return False
+    grupo = normalizar(o.get("grupo"))
+    return "gaming" in grupo or "videojuego" in grupo or bool(PLATAFORMAS.search(titulo))
 
 
 def evaluar(o):
     """Devuelve (color, caida) o None si no hay que avisar."""
     if o["caducada"] or not tienda_vigilada(o):
+        return None
+    if EXCLUIR_VIDEOJUEGOS and es_videojuego(o):
         return None
     precio, ref = o["precio"], o["referencia"]
     caida = None
