@@ -45,3 +45,4 @@ jobs:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           DESCUENTO_MIN: "70"   # naranjas desde el 70% y rojos; sin videojuegos
+          VENTANA_MIN: "720"    # revisa 12 h hacia atrás: GitHub a veces tarda horas en ejecutarlo
