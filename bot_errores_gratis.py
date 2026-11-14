@@ -24,7 +24,7 @@ Variables de entorno:
   TIENDAS        opcional: limitar a estas tiendas, separadas por comas.
                  Vacío (por defecto) = todas las tiendas.
   EXCLUIR_VIDEOJUEGOS  "0" para volver a recibir videojuegos (por defecto "1")
-  VENTANA_MIN    minutos hacia atrás que se revisan en cada pasada (por defecto 180)
+  VENTANA_MIN    minutos hacia atrás que se revisan en cada pasada (por defecto 720, 12 horas)
   INTERVALO_MIN  minutos entre consultas en modo continuo (por defecto 3)
 
 Uso:
@@ -47,9 +47,9 @@ import requests
 TG_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
 TG_CHAT = os.getenv("TELEGRAM_CHAT_ID", "")
 DESCUENTO_MIN = int(os.getenv("DESCUENTO_MIN") or "50")
-VENTANA_MIN = int(os.getenv("VENTANA_MIN") or "180")
+VENTANA_MIN = int(os.getenv("VENTANA_MIN") or "720")
 INTERVALO_MIN = int(os.getenv("INTERVALO_MIN") or "3")
-MAX_PAGINAS = 10
+MAX_PAGINAS = int(os.getenv("MAX_PAGINAS") or "30")
 EXCLUIR_VIDEOJUEGOS = (os.getenv("EXCLUIR_VIDEOJUEGOS") or "1") == "1"
 PLATAFORMAS = re.compile(
     r"\b(ps[345]|playstation|xbox|nintendo|switch ?2?|steam|epic games|gog|"
